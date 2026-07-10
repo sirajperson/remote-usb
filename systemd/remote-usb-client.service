@@ -1,0 +1,20 @@
+[Unit]
+Description=Remote USB export daemon (USB/IP usbipd)
+Documentation=https://wiki.archlinux.org/title/USB/IP
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Install the binary somewhere stable, e.g. /usr/local/bin/remote-usb
+ExecStartPre=/usr/local/bin/remote-usb client prepare
+# Direct attachment: auto-export devices. Prefer --match VID:PID for safety.
+# Example: ExecStart=... serve --auto --match 14cd:1212
+ExecStart=/usr/local/bin/remote-usb client serve --port 3240 --auto
+Restart=on-failure
+RestartSec=2
+
+# No authentication: restrict exposure with firewall.
+
+[Install]
+WantedBy=multi-user.target

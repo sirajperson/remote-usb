@@ -1,0 +1,25 @@
+[package]
+name = "remote-usb"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Share USB devices from a client host to a server host over Linux USB/IP"
+readme = "../../README.md"
+keywords = ["usb", "usbip", "remote", "linux"]
+categories = ["command-line-utilities", "os::linux-apis"]
+
+[[bin]]
+name = "remote-usb"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive", "env"] }
+ctrlc = "3"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+pretty_assertions = "1"

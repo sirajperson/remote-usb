@@ -1,0 +1,17 @@
+[Unit]
+Description=Follow remote USB devices from client (direct attachment)
+Documentation=file:///usr/local/share/doc/remote-usb/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Adjust host / filters / binary path.
+ExecStartPre=/usr/local/bin/remote-usb server prepare
+ExecStart=/usr/local/bin/remote-usb server follow 192.168.1.10 --match 14cd:1212
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+
