@@ -6,7 +6,7 @@
 
 <p align="center">
   <strong>Share USB devices over your network on Linux</strong><br>
-  Plug a device into a <em>client</em> machine — use it on a <em>server</em> as if it were local.
+  Plug a device into one machine — use it on another as if it were local.
 </p>
 
 <p align="center">
@@ -18,140 +18,83 @@
 
 ---
 
-## Why remote-usb?
+## Mental model
 
-Need a USB key, serial adapter, or flash drive on a headless box or lab server — but the hardware is on your desk?
-
-**remote-usb** wraps the Linux kernel [USB/IP](https://wiki.archlinux.org/title/USB/IP) stack in a friendly CLI:
-
-- **Direct attachment** — auto-export on the client, auto-attach on the server
-- **Manual control** — bind / attach individual devices by busid or `VID:PID`
-- **Full USB classes** — storage, HID, serial, and more (whatever the kernel supports)
-- **Trusted-network simple** — plain TCP, no auth (v1); perfect for LAN / VPN labs
-
-> ⚠️ **Security:** traffic is unencrypted and unauthenticated. Use only on trusted networks. Do **not** expose TCP port `3240` to the internet.
-
----
-
-## Architecture
+| You want to… | Command style |
+|--------------|----------------|
+| Share USB devices **plugged into this machine** | Default commands + `server` |
+| **Use** USB devices from another machine | `host <ip> …` |
 
 ```
-┌─────────────────────────┐         TCP :3240          ┌─────────────────────────┐
-│  CLIENT (export)        │  ───────────────────────►  │  SERVER (import)        │
-│  physical USB device    │      USB/IP protocol       │  device appears in lsusb│
-│  usbip_host + usbipd    │                            │  vhci_hcd               │
-└─────────────────────────┘                            └─────────────────────────┘
+┌──────────────────────────┐       TCP :3240        ┌──────────────────────────┐
+│  THIS MACHINE (export)   │  ───────────────────►  │  OTHER MACHINE (import)  │
+│  remote-usb server       │                        │  remote-usb host <ip> …  │
+│  remote-usb bind 1-6     │                        │  remote-usb host <ip> bind│
+└──────────────────────────┘                        └──────────────────────────┘
 ```
 
-| Our term   | Physical USB? | Kernel role | Modules                    |
-|------------|---------------|-------------|----------------------------|
-| **client** | Yes           | Export      | `usbip_core`, `usbip_host` |
-| **server** | No (virtual)  | Import      | `usbip_core`, `vhci_hcd`   |
-
-> Our naming matches *“the server mounts devices from the client.”* Classic USB/IP docs swap “server” and “client.”
-
----
-
-## Features
-
-| Feature | Description |
-|---------|-------------|
-| Direct attachment | `client serve --auto` + `server follow` for plug-and-play |
-| VID:PID filters | `--match` / `--exclude` so keyboards stay local |
-| Manual bind/attach | Full control when you need it |
-| Human-friendly CLI | Rich `--help` with examples |
-| systemd samples | Units under [`systemd/`](systemd/) |
-
----
-
-## Requirements
-
-- **Linux** with USB/IP modules (`usbip_core`, `usbip_host`, `vhci_hcd`)
-- Userspace tools: `usbip`, `usbipd`
-  - Debian/Ubuntu: `sudo apt install linux-tools-generic`  
-    (or `linux-tools-$(uname -r)`)
-  - Fedora: `sudo dnf install usbip`
-  - Arch: `sudo pacman -S usbip`
-- **Root** for prepare / serve / bind / attach / follow
-- [Rust](https://rustup.rs/) toolchain to build from source
-
----
-
-## Install
-
-```bash
-git clone https://github.com/<you>/remote_usb.git
-cd remote_usb
-cargo build --release -p remote-usb
-
-# optional: install the binary
-sudo install -Dm755 target/release/remote-usb /usr/local/bin/remote-usb
-```
-
-Binary path after build: `target/release/remote-usb`
+> ⚠️ **Security:** plain TCP, no authentication. Trusted LAN/VPN only. Do not expose port `3240` to the internet.
 
 ---
 
 ## Quick start
 
-### Direct attachment (recommended)
+### Direct attachment (automatic)
 
-**Client** (USB plugged in here) — leave running:
-
-```bash
-sudo remote-usb client serve --auto --match 14cd:1212
-```
-
-**Server** (where you use the device) — leave running:
+**Machine with the USB device** — leave running:
 
 ```bash
-sudo remote-usb server follow 192.168.1.10 --match 14cd:1212
+sudo remote-usb server --auto --match 14cd:1212
+# same as:
+sudo remote-usb server 0.0.0.0 --auto --match 14cd:1212
 ```
 
-Plug or unplug on the client; within a few seconds the server attaches or detaches.
-
-> Prefer `--match VID:PID`. Without it, `--auto` may export **all** non-hub devices (including keyboard/mouse).
-
-Find IDs with:
+**Machine that should use it** — leave running:
 
 ```bash
-remote-usb client list
+sudo remote-usb host 192.168.1.10 --auto --match 14cd:1212
 ```
 
-### Manual mode
+Plug/unplug on the first machine; the second attaches/detaches within a few seconds.
 
-<details>
-<summary>Click to expand step-by-step manual export / attach</summary>
+> Prefer `--match VID:PID`. Without it, `--auto` may share **all** non-hub devices (including keyboard/mouse).
 
-**Client**
+Discover IDs:
 
 ```bash
-sudo remote-usb client prepare
-remote-usb client list
-sudo remote-usb client serve          # leave running
-sudo remote-usb client bind 14cd:1212 # other terminal
+remote-usb list
 ```
 
-**Server**
+### Manual
+
+**Export side** (USB plugged in here):
 
 ```bash
-sudo remote-usb server prepare
-remote-usb server list 192.168.1.10
-sudo remote-usb server attach 192.168.1.10 14cd:1212
-remote-usb server ports
+sudo remote-usb prepare
+remote-usb list
+sudo remote-usb server 0.0.0.0          # leave running
+sudo remote-usb bind 1-6                # other terminal
+# or: sudo remote-usb bind 14cd:1212
 ```
 
-**Tear down**
+**Import side** (use the device):
 
 ```bash
-sudo remote-usb server detach 0       # VHCI port from `server ports`
-sudo remote-usb client unbind 14cd:1212
-# Ctrl+C serve / follow
+sudo remote-usb host 192.168.1.10 prepare
+remote-usb host 192.168.1.10 list
+sudo remote-usb host 192.168.1.10 bind 1-6
+remote-usb ports
 ```
 
-</details>
+**Tear down:**
 
-After attach, mass-storage devices appear under `/dev/disk/by-id/` (desktop/udisks may mount them).
+```bash
+sudo remote-usb detach 0                # VHCI port from `ports`
+sudo remote-usb unbind 1-6              # on the export machine
+# Ctrl+C server / host --auto
+```
+
+After attach, check:
 
 ```bash
 lsusb
@@ -160,33 +103,37 @@ ls -l /dev/disk/by-id/
 
 ---
 
-## CLI overview
+## CLI
+
+### Export side (default)
 
 ```text
-remote-usb client prepare
-remote-usb client list
-remote-usb client bind <BUSID|VID:PID>
-remote-usb client unbind <BUSID|VID:PID>
-remote-usb client serve [--port 3240] [--auto]
-    [--match VID:PID]... [--exclude VID:PID]...
-    [--interval SECS] [--no-unbind-on-exit]
+remote-usb list
+remote-usb bind <BUSID|VID:PID>
+remote-usb unbind <BUSID|VID:PID>
+remote-usb prepare
 
-remote-usb server prepare
-remote-usb server list <HOST>
-remote-usb server attach <HOST> <BUSID|VID:PID>
-remote-usb server detach <PORT>
-remote-usb server ports
-remote-usb server follow <HOST>
-    [--match VID:PID]... [--exclude VID:PID]...
-    [--interval SECS] [--no-detach-missing]
+remote-usb server [0.0.0.0] [--port 3240]
+    [--auto] [--match VID:PID]... [--exclude VID:PID]...
+    [--interval SECS] [--no-unbind-on-exit]
 ```
 
-Built-in help (with examples):
+### Import side
+
+```text
+remote-usb host <IP> prepare
+remote-usb host <IP> list
+remote-usb host <IP> bind <BUSID|VID:PID>    # alias: attach
+remote-usb host <IP> --auto [--match VID:PID]...
+
+remote-usb ports
+remote-usb detach <VHCI_PORT>
+```
 
 ```bash
 remote-usb --help
-remote-usb client serve --help
-remote-usb server follow --help
+remote-usb server --help
+remote-usb host --help
 ```
 
 | Variable / flag | Meaning |
@@ -196,22 +143,53 @@ remote-usb server follow --help
 
 ---
 
-## systemd
+## Requirements
 
-Sample units live in [`systemd/`](systemd/):
+- **Linux** with USB/IP modules (`usbip_core`, `usbip_host`, `vhci_hcd`)
+- `usbip` and `usbipd`
+  - Debian/Ubuntu: `sudo apt install linux-tools-generic`
+  - Fedora: `sudo dnf install usbip`
+  - Arch: `sudo pacman -S usbip`
+- **Root** for `server`, `bind`, `host …`, `detach`, `prepare`
+- [Rust](https://rustup.rs/) to build from source
+
+---
+
+## Install
+
+```bash
+git clone https://github.com/<you>/remote_usb.git
+cd remote_usb
+cargo build --release -p remote-usb
+sudo install -Dm755 target/release/remote-usb /usr/local/bin/remote-usb
+```
+
+---
+
+## Features
+
+| Feature | Description |
+|---------|-------------|
+| Simple CLI | Export is default; `host <ip>` for import |
+| Direct attachment | `server --auto` + `host <ip> --auto` |
+| Filters | `--match` / `--exclude` by VID:PID |
+| Manual control | `bind` / `host … bind` when you need it |
+| systemd samples | See [`systemd/`](systemd/) |
+
+---
+
+## systemd
 
 | File | Role |
 |------|------|
-| `remote-usb-client.service` | Long-running client export (`serve --auto`) |
-| `remote-usb-server-attach.service.example` | Server `follow` example |
-
-Copy, set the binary path and filters, then enable as needed.
+| [`systemd/remote-usb-client.service`](systemd/remote-usb-client.service) | Export daemon (`server --auto`) |
+| [`systemd/remote-usb-server-attach.service.example`](systemd/remote-usb-server-attach.service.example) | Import (`host <ip> --auto`) |
 
 ---
 
 ## Firewall
 
-USB/IP uses **TCP 3240** by default. On the client, allow only your server:
+On the export machine, allow only your peer:
 
 ```bash
 sudo ufw allow from 192.168.1.20 to any port 3240 proto tcp
@@ -221,14 +199,7 @@ sudo ufw allow from 192.168.1.20 to any port 3240 proto tcp
 
 ## How it works
 
-`remote-usb` does **not** reimplement the USB/IP wire protocol. It:
-
-1. Loads the right kernel modules  
-2. Wraps system `usbip` / `usbipd`  
-3. Parses device lists and accepts **busid** or **VID:PID** selectors  
-4. Optionally loops for auto-export / auto-attach  
-
-Device semantics come from the kernel (latency and USB/IP limits still apply).
+Wraps kernel USB/IP (`usbip` / `usbipd`): loads modules, binds/attaches devices, optional auto loops. Does not reimplement the wire protocol.
 
 ---
 
@@ -237,34 +208,11 @@ Device semantics come from the kernel (latency and USB/IP limits still apply).
 - Linux only  
 - No TLS or authentication  
 - Busids can change across reboot — prefer unique `VID:PID`  
-- Hotplug is polled (`--interval`), not udev-native  
-
----
-
-## Project layout
-
-```text
-remote_usb/
-├── assets/logo.jpg          # project logo
-├── crates/remote-usb/       # CLI crate
-├── systemd/                 # example unit files
-├── Cargo.toml               # workspace
-└── README.md
-```
-
----
-
-## Contributing
-
-Issues and PRs welcome. For local checks:
-
-```bash
-cargo test -p remote-usb
-cargo build --release -p remote-usb
-```
+- Polling interval for auto mode (not udev-native)  
+- `server <addr>` accepts an address for clarity; `usbipd` listens on all interfaces — restrict with firewall  
 
 ---
 
 ## License
 
-[MIT](LICENSE) — free to use, modify, and distribute.
+[MIT](LICENSE)

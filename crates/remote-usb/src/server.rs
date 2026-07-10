@@ -16,7 +16,7 @@ pub fn prepare() -> Result<()> {
     for line in kmod::module_status_lines(&["usbip_core", "vhci_hcd"]) {
         println!("{line}");
     }
-    println!("Server (import) modules ready.");
+    println!("Import modules ready (vhci_hcd).");
     Ok(())
 }
 
@@ -52,7 +52,7 @@ pub fn attach(host: &str, selector: &str, port: u16) -> Result<()> {
     println!(
         "The device should appear in `lsusb` shortly.\n\
          Mass-storage devices typically show up under /dev/disk/by-id/ and may be\n\
-         auto-mounted by your desktop/udisks. Check: remote-usb server ports"
+         auto-mounted by your desktop/udisks. Check: remote-usb ports"
     );
     Ok(())
 }
@@ -69,14 +69,14 @@ pub fn detach(port_num: u32) -> Result<()> {
 pub fn ports() -> Result<()> {
     // Prefer having modules loaded, but still try to list.
     if !kmod::is_loaded("vhci_hcd") {
-        eprintln!("warning: vhci_hcd is not loaded; run `remote-usb server prepare`");
+        eprintln!("warning: vhci_hcd is not loaded; run `sudo remote-usb host <ip> prepare`");
     }
     let ports = usbip_cmd::port_list()?;
     println!("{}", format_port_table(&ports));
     Ok(())
 }
 
-/// Options for continuous direct attachment (`server follow`).
+/// Options for continuous direct attachment (`host <ip> --auto`).
 pub struct FollowOptions {
     pub host: String,
     pub port: u16,
@@ -86,17 +86,16 @@ pub struct FollowOptions {
     pub detach_missing: bool,
 }
 
-/// Continuously attach every matching device exported by the client.
+/// Continuously attach every matching device exported by a remote host.
 ///
-/// Pair with `remote-usb client serve --auto` for direct attachment.
+/// Pair with `remote-usb server --auto` for direct attachment.
 pub fn follow(opts: FollowOptions) -> Result<()> {
     require_root("auto-attach remote USB devices")?;
     ensure_import_modules()?;
 
     println!(
-        "Following {}:{port} for direct attachment.\n\
-         Filter: {}\n\
-         Poll interval: {:.1}s | detach missing: {}\n\
+        "Using USB from {}:{port} (auto-attach).\n\
+         Filter: {} | poll: {:.1}s | detach missing: {}\n\
          Press Ctrl+C to stop.",
         opts.host,
         opts.filter.describe(),

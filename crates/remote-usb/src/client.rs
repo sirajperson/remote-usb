@@ -16,7 +16,7 @@ pub fn prepare() -> Result<()> {
     for line in kmod::module_status_lines(&["usbip_core", "usbip_host"]) {
         println!("{line}");
     }
-    println!("Client (export) modules ready.");
+    println!("Export modules ready (usbip_host).");
     Ok(())
 }
 
@@ -46,7 +46,7 @@ pub fn bind(selector: &str) -> Result<()> {
             format!(" — {}", dev.product)
         }
     );
-    println!("Ensure `remote-usb client serve` is running so the server can attach.");
+    println!("Ensure `remote-usb server` is running so another machine can use this device.");
     Ok(())
 }
 
@@ -72,8 +72,10 @@ pub fn unbind(selector: &str) -> Result<()> {
     Ok(())
 }
 
-/// Options for `client serve`.
+/// Options for `remote-usb server`.
 pub struct ServeOptions {
+    /// CLI bind address (documentation / future use; usbipd listens on all ifaces).
+    pub bind_addr: String,
     pub port: u16,
     pub ipv4_only: bool,
     pub ipv6_only: bool,
@@ -94,11 +96,12 @@ pub fn serve(opts: ServeOptions) -> Result<()> {
         serve_with_auto(opts)
     } else {
         println!(
-            "Starting USB/IP export daemon on TCP port {} (plain TCP, no auth).\n\
-             Bind devices with: remote-usb client bind <BUSID|VID:PID>\n\
-             Or use --auto for direct attachment.\n\
+            "Sharing USB on {} (TCP port {}, plain TCP, no auth).\n\
+             Share a device:  remote-usb bind <BUSID|VID:PID>\n\
+             Auto mode:       remote-usb server --auto --match <VID:PID>\n\
+             On the other machine: remote-usb host <this-ip> bind …\n\
              Press Ctrl+C to stop.",
-            opts.port
+            opts.bind_addr, opts.port
         );
         usbip_cmd::serve_foreground(opts.port, opts.ipv4_only, opts.ipv6_only)
     }
@@ -106,12 +109,12 @@ pub fn serve(opts: ServeOptions) -> Result<()> {
 
 fn serve_with_auto(opts: ServeOptions) -> Result<()> {
     println!(
-        "Starting USB/IP export with direct attachment (auto-export).\n\
-         Port: {} | Filter: {}\n\
-         Poll interval: {:.1}s | Plain TCP, no auth.\n\
-         WARNING: Exported devices leave this machine (keyboard/mouse will disconnect).\n\
-         Prefer --match VID:PID for specific devices.\n\
+        "Sharing USB with auto-export on {} (TCP port {}).\n\
+         Filter: {} | poll: {:.1}s | plain TCP, no auth.\n\
+         WARNING: Shared devices leave this machine (keyboard/mouse will disconnect).\n\
+         Prefer --match VID:PID. Other machine: remote-usb host <this-ip> --auto\n\
          Press Ctrl+C to stop.",
+        opts.bind_addr,
         opts.port,
         opts.filter.describe(),
         opts.interval.as_secs_f32()
