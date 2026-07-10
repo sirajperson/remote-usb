@@ -1,19 +1,17 @@
 [Unit]
-Description=Remote USB export daemon (share local USB devices)
-Documentation=https://wiki.archlinux.org/title/USB/IP
+Description=Remote USB client — share local USB devices with a server
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-# Install binary to a stable path, e.g. /usr/local/bin/remote-usb
 ExecStartPre=/usr/local/bin/remote-usb prepare
-# Prefer --match VID:PID so keyboards/mice are not exported.
-ExecStart=/usr/local/bin/remote-usb server 0.0.0.0 --port 3240 --auto
+# Prefer --match VID:PID so keyboards/mice are not shared.
+ExecStart=/usr/local/bin/remote-usb share 0.0.0.0 --port 3240 --auto
 Restart=on-failure
 RestartSec=2
 
-# No authentication: restrict with firewall.
+# No authentication: restrict with firewall on this client.
 
 [Install]
 WantedBy=multi-user.target

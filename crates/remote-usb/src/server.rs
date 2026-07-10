@@ -16,7 +16,7 @@ pub fn prepare() -> Result<()> {
     for line in kmod::module_status_lines(&["usbip_core", "vhci_hcd"]) {
         println!("{line}");
     }
-    println!("Import modules ready (vhci_hcd).");
+    println!("Server modules ready (vhci_hcd) — this machine can use client USB devices.");
     Ok(())
 }
 
@@ -50,9 +50,10 @@ pub fn attach(host: &str, selector: &str, port: u16) -> Result<()> {
         println!("Product: {}", dev.product);
     }
     println!(
-        "The device should appear in `lsusb` shortly.\n\
-         Mass-storage devices typically show up under /dev/disk/by-id/ and may be\n\
-         auto-mounted by your desktop/udisks. Check: remote-usb ports"
+        "Device is now available on this server.\n\
+         It should appear in `lsusb` shortly.\n\
+         Mass-storage: /dev/disk/by-id/ (desktop/udisks may mount it).\n\
+         Check: remote-usb ports"
     );
     Ok(())
 }
@@ -69,14 +70,14 @@ pub fn detach(port_num: u32) -> Result<()> {
 pub fn ports() -> Result<()> {
     // Prefer having modules loaded, but still try to list.
     if !kmod::is_loaded("vhci_hcd") {
-        eprintln!("warning: vhci_hcd is not loaded; run `sudo remote-usb host <ip> prepare`");
+        eprintln!("warning: vhci_hcd is not loaded; run `sudo remote-usb server prepare`");
     }
     let ports = usbip_cmd::port_list()?;
     println!("{}", format_port_table(&ports));
     Ok(())
 }
 
-/// Options for continuous direct attachment (`host <ip> --auto`).
+/// Options for continuous attachment of a client's devices (`server --client … --auto`).
 pub struct FollowOptions {
     pub host: String,
     pub port: u16,
@@ -86,15 +87,15 @@ pub struct FollowOptions {
     pub detach_missing: bool,
 }
 
-/// Continuously attach every matching device exported by a remote host.
+/// Continuously attach every matching device shared by a client.
 ///
-/// Pair with `remote-usb server --auto` for direct attachment.
+/// Pair with `remote-usb share --auto` on the client.
 pub fn follow(opts: FollowOptions) -> Result<()> {
-    require_root("auto-attach remote USB devices")?;
+    require_root("use USB devices from a client")?;
     ensure_import_modules()?;
 
     println!(
-        "Using USB from {}:{port} (auto-attach).\n\
+        "Server using USB from client {}:{port} (auto-attach).\n\
          Filter: {} | poll: {:.1}s | detach missing: {}\n\
          Press Ctrl+C to stop.",
         opts.host,

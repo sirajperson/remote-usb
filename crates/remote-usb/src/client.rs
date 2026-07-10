@@ -16,7 +16,7 @@ pub fn prepare() -> Result<()> {
     for line in kmod::module_status_lines(&["usbip_core", "usbip_host"]) {
         println!("{line}");
     }
-    println!("Export modules ready (usbip_host).");
+    println!("Client modules ready (usbip_host) — this machine can share USB.");
     Ok(())
 }
 
@@ -46,7 +46,12 @@ pub fn bind(selector: &str) -> Result<()> {
             format!(" — {}", dev.product)
         }
     );
-    println!("Ensure `remote-usb server` is running so another machine can use this device.");
+    println!(
+        "Device is shared from this client.\n\
+         Keep `remote-usb share` running, and on the server:\n\
+           remote-usb server --client <this-ip> bind {}  (or --auto)",
+        dev.busid
+    );
     Ok(())
 }
 
@@ -72,7 +77,7 @@ pub fn unbind(selector: &str) -> Result<()> {
     Ok(())
 }
 
-/// Options for `remote-usb server`.
+/// Options for `remote-usb share` (client export listener).
 pub struct ServeOptions {
     /// CLI bind address (documentation / future use; usbipd listens on all ifaces).
     pub bind_addr: String,
@@ -87,19 +92,19 @@ pub struct ServeOptions {
     pub unbind_on_exit: bool,
 }
 
-/// Run usbipd (and optional auto-export loop).
+/// Run the client share daemon (usbipd + optional auto-export).
 pub fn serve(opts: ServeOptions) -> Result<()> {
-    require_root("run the USB/IP export daemon")?;
+    require_root("run the client share daemon")?;
     ensure_export_modules()?;
 
     if opts.auto {
         serve_with_auto(opts)
     } else {
         println!(
-            "Sharing USB on {} (TCP port {}, plain TCP, no auth).\n\
+            "Client sharing USB on {} (TCP port {}, plain TCP, no auth).\n\
              Share a device:  remote-usb bind <BUSID|VID:PID>\n\
-             Auto mode:       remote-usb server --auto --match <VID:PID>\n\
-             On the other machine: remote-usb host <this-ip> bind …\n\
+             Auto mode:       remote-usb share --auto --match <VID:PID>\n\
+             On the SERVER:   remote-usb server --client <this-ip> bind …\n\
              Press Ctrl+C to stop.",
             opts.bind_addr, opts.port
         );
@@ -109,10 +114,11 @@ pub fn serve(opts: ServeOptions) -> Result<()> {
 
 fn serve_with_auto(opts: ServeOptions) -> Result<()> {
     println!(
-        "Sharing USB with auto-export on {} (TCP port {}).\n\
+        "Client auto-sharing USB on {} (TCP port {}).\n\
          Filter: {} | poll: {:.1}s | plain TCP, no auth.\n\
-         WARNING: Shared devices leave this machine (keyboard/mouse will disconnect).\n\
-         Prefer --match VID:PID. Other machine: remote-usb host <this-ip> --auto\n\
+         WARNING: Shared devices leave this client (keyboard/mouse will disconnect).\n\
+         Prefer --match VID:PID.\n\
+         On the SERVER: remote-usb server --client <this-ip> --auto\n\
          Press Ctrl+C to stop.",
         opts.bind_addr,
         opts.port,
