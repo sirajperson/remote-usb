@@ -50,10 +50,10 @@ pub fn attach(host: &str, selector: &str, port: u16) -> Result<()> {
         println!("Product: {}", dev.product);
     }
     println!(
-        "Device is now available on this server.\n\
-         It should appear in `lsusb` shortly.\n\
-         Mass-storage: /dev/disk/by-id/ (desktop/udisks may mount it).\n\
-         Check: remote-usb ports"
+        "Imported on this server — the device should appear as local USB.\n\
+         Confirm:  lsusb\n\
+         Status:   remote-usb ports\n\
+         Storage:  ls -l /dev/disk/by-id/  (desktop/udisks may auto-mount)"
     );
     Ok(())
 }
@@ -95,8 +95,9 @@ pub fn follow(opts: FollowOptions) -> Result<()> {
     ensure_import_modules()?;
 
     println!(
-        "Server using USB from client {}:{port} (auto-attach).\n\
+        "Server importing USB from client {}:{port} (auto).\n\
          Filter: {} | poll: {:.1}s | detach missing: {}\n\
+         Imported devices show in lsusb on this server.\n\
          Press Ctrl+C to stop.",
         opts.host,
         opts.filter.describe(),

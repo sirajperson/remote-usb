@@ -20,22 +20,23 @@
 
 ## Mental model
 
-| Role | Where USB is | What it does |
-|------|----------------|--------------|
-| **Client** | Plugged in here | Shares devices with the server |
-| **Server** | Uses remote devices | Attaches devices that clients share |
+The **server imports** USB devices from **clients**. Clients **export** devices to the server. Once imported, the server sees them like normal local USB hardware (`lsusb`, `/dev/…`).
+
+| Role | Where the stick is | What it does |
+|------|--------------------|--------------|
+| **Server** | Uses remote devices | Imports / mounts devices from clients |
+| **Client** | Physical USB plugged in | Exports devices to the server |
 
 ```
 ┌─────────────────────────┐         network          ┌─────────────────────────┐
-│  CLIENT                 │  ─────────────────────►  │  SERVER                 │
-│  physical USB           │   client shares devices  │  uses those devices     │
-│  remote-usb share       │                          │  remote-usb server …    │
-│  remote-usb bind        │                          │  remote-usb ports       │
+│  CLIENT (export)        │  ─────────────────────►  │  SERVER (import)        │
+│  physical USB           │   client exports devices │  imports & uses them    │
+│  remote-usb share/bind  │                          │  visible in lsusb       │
 └─────────────────────────┘                          └─────────────────────────┘
 ```
 
-Default commands (`list`, `bind`, `share`) are for the **client**.  
-`remote-usb server …` is for the **server**.
+Default commands (`list`, `bind`, `share`) run on the **client**.  
+`remote-usb server …` runs on the **server**.
 
 > ⚠️ **Security:** plain TCP, no authentication. Trusted LAN/VPN only. Do not expose port `3240` to the internet.
 
@@ -45,7 +46,14 @@ Default commands (`list`, `bind`, `share`) are for the **client**.
 
 ### Direct attachment (automatic)
 
-**Client** (USB plugged in) — leave running:
+**1. Server** (imports devices from the client) — leave running:
+
+```bash
+sudo remote-usb server prepare
+sudo remote-usb server --client 192.168.1.10 --auto --match 14cd:1212
+```
+
+**2. Client** (exports its USB to the server) — leave running:
 
 ```bash
 sudo remote-usb share --auto --match 14cd:1212
@@ -53,58 +61,67 @@ sudo remote-usb share --auto --match 14cd:1212
 sudo remote-usb share 0.0.0.0 --auto --match 14cd:1212
 ```
 
-**Server** (uses the client's devices) — leave running:
+Plug/unplug on the client; the server imports/detaches within a few seconds.
 
-```bash
-sudo remote-usb server --client 192.168.1.10 --auto --match 14cd:1212
-# optional bind note:
-sudo remote-usb server 0.0.0.0 --client 192.168.1.10 --auto --match 14cd:1212
-```
-
-Plug/unplug on the client; the server attaches/detaches within a few seconds.
-
-> Prefer `--match VID:PID`. Without it, client `--auto` may share **all** non-hub devices (including keyboard/mouse).
-
-Find IDs on the client:
-
-```bash
-remote-usb list
-```
-
-### Manual
-
-**Client** (USB plugged in here):
-
-```bash
-sudo remote-usb prepare
-remote-usb list
-sudo remote-usb share 0.0.0.0          # leave running
-sudo remote-usb bind 1-6               # other terminal
-# or: sudo remote-usb bind 14cd:1212
-```
-
-**Server** (use the client's device):
-
-```bash
-sudo remote-usb server prepare
-remote-usb server --client 192.168.1.10 list
-sudo remote-usb server --client 192.168.1.10 bind 1-6
-remote-usb ports
-```
-
-**Tear down:**
-
-```bash
-sudo remote-usb detach 0               # on server (port from `ports`)
-sudo remote-usb unbind 1-6             # on client
-# Ctrl+C share / server --auto
-```
-
-After the server attaches a device:
+**3. On the server**, confirm the device is local:
 
 ```bash
 lsusb
-ls -l /dev/disk/by-id/
+remote-usb ports
+ls -l /dev/disk/by-id/    # mass storage
+```
+
+> Prefer `--match VID:PID`. Without it, client `--auto` may export **all** non-hub devices (including keyboard/mouse).
+
+Find IDs on the client with `remote-usb list`.
+
+### Manual
+
+The server loads first, then the client exports, then the server imports a device.
+
+**1. Server — prepare to import**
+
+```bash
+sudo remote-usb server prepare
+```
+
+**2. Client — export devices to the server**
+
+```bash
+sudo remote-usb prepare
+remote-usb list                         # note busid or VID:PID
+sudo remote-usb share 0.0.0.0           # leave running
+sudo remote-usb bind 1-6                # other terminal: export this device
+# or: sudo remote-usb bind 14cd:1212
+```
+
+**3. Server — import a device from the client**
+
+```bash
+# CLIENT_IP = address of the machine running `share`
+remote-usb server --client 192.168.1.10 list
+sudo remote-usb server --client 192.168.1.10 bind 1-6
+```
+
+**4. Server — device is now local**
+
+```bash
+lsusb                    # device appears here on the server
+remote-usb ports         # remote-usb attachment status
+ls -l /dev/disk/by-id/   # mass-storage nodes, if applicable
+```
+
+Your desktop or `udisks` may auto-mount storage after import.
+
+**Tear down**
+
+```bash
+# Server: stop using the device
+sudo remote-usb detach 0               # VHCI port from `remote-usb ports`
+
+# Client: stop exporting
+sudo remote-usb unbind 1-6
+# Ctrl+C on `share` / `server --auto`
 ```
 
 ---
@@ -124,16 +141,15 @@ remote-usb share [0.0.0.0] [--port 3240]
     [--interval SECS] [--no-unbind-on-exit]
 ```
 
-### Server (uses devices from clients)
+### Server (imports devices from clients)
 
 ```text
 remote-usb server prepare
-remote-usb server --client <CLIENT_IP> list
-remote-usb server --client <CLIENT_IP> bind <BUSID|VID:PID>   # alias: attach
-remote-usb server --client <CLIENT_IP> --auto [--match VID:PID]...
-remote-usb server 0.0.0.0 --client <CLIENT_IP> --auto
+remote-usb server --client <CLIENT_IP> list                 # devices client is exporting
+remote-usb server --client <CLIENT_IP> bind <BUSID|VID:PID> # import one device (alias: attach)
+remote-usb server --client <CLIENT_IP> --auto [--match …]   # keep importing as client exports
 
-remote-usb ports
+remote-usb ports              # devices already imported on this server
 remote-usb detach <VHCI_PORT>
 ```
 
@@ -175,15 +191,11 @@ sudo install -Dm755 target/release/remote-usb /usr/local/bin/remote-usb
 
 ## How it works
 
-Product language: **clients share, server uses.**
+1. **Server** loads import support (`vhci_hcd`) and imports devices from a client  
+2. **Client** exports selected USB devices (`share` + `bind`)  
+3. Once imported, the **server** sees them as normal USB devices (`lsusb`, `/dev/…`)  
 
-Under the hood this wraps kernel [USB/IP](https://wiki.archlinux.org/title/USB/IP):
-
-1. Client runs an export listener (`share` → `usbipd`) and binds devices  
-2. Server connects to the client and attaches devices (`vhci_hcd`)  
-3. Optional auto loops keep both sides in sync  
-
-You do not reimplement the wire protocol; the CLI orchestrates system tools.
+Under the hood this wraps kernel [USB/IP](https://wiki.archlinux.org/title/USB/IP); the CLI orchestrates `usbip` / `usbipd`.
 
 ---
 

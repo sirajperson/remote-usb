@@ -47,10 +47,11 @@ pub fn bind(selector: &str) -> Result<()> {
         }
     );
     println!(
-        "Device is shared from this client.\n\
-         Keep `remote-usb share` running, and on the server:\n\
-           remote-usb server --client <this-ip> bind {}  (or --auto)",
-        dev.busid
+        "Exported from this client (device {}).\n\
+         Keep `remote-usb share` running. On the server, import it with:\n\
+           sudo remote-usb server --client <this-ip> bind {}\n\
+         Then on the server: lsusb",
+        dev.busid, dev.busid
     );
     Ok(())
 }
@@ -101,10 +102,11 @@ pub fn serve(opts: ServeOptions) -> Result<()> {
         serve_with_auto(opts)
     } else {
         println!(
-            "Client sharing USB on {} (TCP port {}, plain TCP, no auth).\n\
-             Share a device:  remote-usb bind <BUSID|VID:PID>\n\
+            "Client exporting USB on {} (TCP port {}, plain TCP, no auth).\n\
+             Export a device: remote-usb bind <BUSID|VID:PID>\n\
              Auto mode:       remote-usb share --auto --match <VID:PID>\n\
              On the SERVER:   remote-usb server --client <this-ip> bind …\n\
+             Then on server:  lsusb\n\
              Press Ctrl+C to stop.",
             opts.bind_addr, opts.port
         );
@@ -114,11 +116,12 @@ pub fn serve(opts: ServeOptions) -> Result<()> {
 
 fn serve_with_auto(opts: ServeOptions) -> Result<()> {
     println!(
-        "Client auto-sharing USB on {} (TCP port {}).\n\
+        "Client auto-exporting USB on {} (TCP port {}).\n\
          Filter: {} | poll: {:.1}s | plain TCP, no auth.\n\
-         WARNING: Shared devices leave this client (keyboard/mouse will disconnect).\n\
+         WARNING: Exported devices leave this client (keyboard/mouse will disconnect).\n\
          Prefer --match VID:PID.\n\
          On the SERVER: remote-usb server --client <this-ip> --auto\n\
+         Imported devices appear in lsusb on the server.\n\
          Press Ctrl+C to stop.",
         opts.bind_addr,
         opts.port,
