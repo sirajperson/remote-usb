@@ -145,6 +145,7 @@ pub fn list_local() -> Result<Vec<UsbDevice>> {
 }
 
 /// List devices exported by a remote host.
+#[allow(dead_code)]
 pub fn list_remote(host: &str, port: u16) -> Result<Vec<UsbDevice>> {
     let remote_arg = format!("--remote={host}");
     match run_usbip_with_port(port, &["list", "-p", remote_arg.as_str()]) {

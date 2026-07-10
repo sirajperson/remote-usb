@@ -1,12 +1,11 @@
 [Unit]
-Description=Remote USB client — attach local USB devices to the server
+Description=Remote USB client — attach local USB to a remote-usb server
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-# Set SERVER_IP to the machine running `remote-usb serve`.
-# Prefer --match VID:PID so keyboards/mice stay local.
+# SERVER_IP = machine running `remote-usb serve`
 ExecStartPre=/usr/local/bin/remote-usb prepare
 ExecStart=/usr/local/bin/remote-usb attach SERVER_IP --auto --match 14cd:1212
 Restart=on-failure

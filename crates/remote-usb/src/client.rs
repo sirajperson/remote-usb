@@ -4,30 +4,31 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+use crate::control::{self, ClientMsg, ControlSession};
 use crate::error::Result;
 use crate::filter::{self, DeviceFilter};
 use crate::kmod::{self, ensure_export_modules};
 use crate::privilege::require_root;
 use crate::usbip_cmd::{self, format_device_table};
 
-/// Load client (physical USB) kernel modules.
+/// Load client modules (physical USB host).
 pub fn prepare() -> Result<()> {
     ensure_export_modules()?;
     for line in kmod::module_status_lines(&["usbip_core", "usbip_host"]) {
         println!("{line}");
     }
-    println!("Client ready — this machine can attach USB devices to a server.");
+    println!("Client ready — you can attach local USB devices to a server.");
     Ok(())
 }
 
-/// List local USB devices on the client.
+/// List local USB devices.
 pub fn list() -> Result<()> {
     let devices = usbip_cmd::list_local()?;
     println!("{}", format_device_table(&devices));
     Ok(())
 }
 
-/// Stop offering a local device (return it to local drivers).
+/// Stop offering a local device.
 pub fn unbind(selector: &str) -> Result<()> {
     require_root("release a USB device")?;
     let devices = usbip_cmd::list_local().unwrap_or_default();
@@ -41,20 +42,18 @@ pub fn unbind(selector: &str) -> Result<()> {
         });
     };
 
-    tracing::info!(%busid, "unbinding device");
     usbip_cmd::unbind(&busid)?;
-    println!("Released {busid} back to local use.");
+    println!("Released {busid}.");
     Ok(())
 }
 
-/// Options for client `attach` — attach local USB to a remote server.
+/// Client `attach` options: connect to a waiting server and offer devices.
 pub struct AttachOptions {
-    /// Server the client is attaching devices to (for messages / operator clarity).
     pub server_addr: String,
-    pub port: u16,
+    pub control_port: u16,
+    pub usbip_port: u16,
     pub ipv4_only: bool,
     pub ipv6_only: bool,
-    /// One device to attach; None when auto.
     pub selector: Option<String>,
     pub auto: bool,
     pub filter: DeviceFilter,
@@ -62,49 +61,87 @@ pub struct AttachOptions {
     pub unbind_on_exit: bool,
 }
 
-/// Client: attach local USB device(s) so the server can receive them.
+/// Attach local USB device(s) to a server that is already running `serve`.
 pub fn attach_to_server(opts: AttachOptions) -> Result<()> {
     require_root("attach USB devices to the server")?;
     ensure_export_modules()?;
 
-    if opts.auto {
-        attach_auto(opts)
+    // Local USB/IP export listener so the server can pull the device after OFFER.
+    let mut child = usbip_cmd::spawn_usbipd(opts.usbip_port, opts.ipv4_only, opts.ipv6_only)?;
+    thread::sleep(Duration::from_millis(300));
+
+    let result = if opts.auto {
+        attach_auto(&opts)
     } else {
-        let selector = opts
+        let sel = opts
             .selector
             .as_deref()
             .expect("selector required without --auto");
-        attach_one(&opts, selector)
-    }
+        attach_one(&opts, sel)
+    };
+
+    let _ = child.kill();
+    let _ = child.wait();
+    result
 }
 
 fn attach_one(opts: &AttachOptions, selector: &str) -> Result<()> {
-    // Need the export listener up so the server can receive this device.
-    let mut child = usbip_cmd::spawn_usbipd(opts.port, opts.ipv4_only, opts.ipv6_only)?;
-    thread::sleep(Duration::from_millis(300));
-
     let devices = usbip_cmd::list_local()?;
     let dev = usbip_cmd::resolve_selector(&devices, selector)?;
-    tracing::info!(busid = %dev.busid, vid_pid = %dev.vid_pid, "attaching to server");
+
     usbip_cmd::bind(&dev.busid)?;
+    println!(
+        "Offering {} ({}) to server {}…",
+        dev.busid, dev.vid_pid, opts.server_addr
+    );
+
+    control::send_to_server(
+        &opts.server_addr,
+        opts.control_port,
+        &ClientMsg::Offer {
+            usbip_port: opts.usbip_port,
+            busid: dev.busid.clone(),
+        },
+    )?;
 
     println!(
-        "Client attached {} ({}) to server {}.\n\
+        "Server accepted {}.\n\
          Keep this process running while the server uses the device.\n\
-         On the server (if not using --auto):\n\
-           sudo remote-usb serve --client <this-client-ip> import {}\n\
-         On the server, confirm: lsusb\n\
-         Press Ctrl+C to stop offering this device.",
-        dev.busid,
-        dev.vid_pid,
-        opts.server_addr,
+         On the server: lsusb\n\
+         Press Ctrl+C to detach.",
         dev.busid
     );
-    if !dev.product.is_empty() {
-        println!("Product: {}", dev.product);
-    }
 
-    // Block until Ctrl+C so usbipd stays up.
+    wait_until_ctrl_c();
+
+    println!("Revoking {} from server…", dev.busid);
+    let _ = control::send_to_server(
+        &opts.server_addr,
+        opts.control_port,
+        &ClientMsg::Revoke {
+            busid: dev.busid.clone(),
+        },
+    );
+    let _ = usbip_cmd::unbind(&dev.busid);
+    println!("Done.");
+    Ok(())
+}
+
+fn attach_auto(opts: &AttachOptions) -> Result<()> {
+    println!(
+        "Client connecting to server {} (control port {}).\n\
+         Auto-attaching matching devices | filter: {} | poll: {:.1}s\n\
+         WARNING: without --match this may attach keyboards/mice.\n\
+         Press Ctrl+C to stop.",
+        opts.server_addr,
+        opts.control_port,
+        opts.filter.describe(),
+        opts.interval.as_secs_f32()
+    );
+
+    let mut session = ControlSession::connect(&opts.server_addr, opts.control_port)?;
+    let mut offered: HashSet<String> = HashSet::new();
+
     let running = Arc::new(AtomicBool::new(true));
     let flag = running.clone();
     let _ = ctrlc::set_handler(move || {
@@ -112,100 +149,39 @@ fn attach_one(opts: &AttachOptions, selector: &str) -> Result<()> {
     });
 
     while running.load(Ordering::SeqCst) {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                return Err(crate::error::Error::Message(format!(
-                    "export listener exited: {status}"
-                )));
-            }
-            Ok(None) => thread::sleep(Duration::from_millis(200)),
-            Err(e) => {
-                return Err(crate::error::Error::Message(format!(
-                    "failed to poll export listener: {e}"
-                )));
-            }
-        }
-    }
-
-    println!("Stopping…");
-    let _ = usbip_cmd::unbind(&dev.busid);
-    let _ = child.kill();
-    let _ = child.wait();
-    println!("Device {} released.", dev.busid);
-    Ok(())
-}
-
-fn attach_auto(opts: AttachOptions) -> Result<()> {
-    println!(
-        "Client attaching USB devices to server {} (TCP port {}).\n\
-         Filter: {} | poll: {:.1}s\n\
-         WARNING: without --match this may attach keyboards/mice too.\n\
-         On the server run:\n\
-           sudo remote-usb serve 0.0.0.0 --client <this-client-ip> --auto\n\
-         Devices then appear in lsusb on the server.\n\
-         Press Ctrl+C to stop.",
-        opts.server_addr,
-        opts.port,
-        opts.filter.describe(),
-        opts.interval.as_secs_f32()
-    );
-
-    let mut child = usbip_cmd::spawn_usbipd(opts.port, opts.ipv4_only, opts.ipv6_only)?;
-    thread::sleep(Duration::from_millis(300));
-
-    let running = Arc::new(AtomicBool::new(true));
-    let flag = running.clone();
-    if let Err(e) = ctrlc::set_handler(move || {
-        flag.store(false, Ordering::SeqCst);
-    }) {
-        tracing::warn!(error = %e, "could not install Ctrl+C handler");
-    }
-
-    let mut offered: HashSet<String> = HashSet::new();
-
-    while running.load(Ordering::SeqCst) {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                return Err(crate::error::Error::Message(format!(
-                    "export listener exited: {status}"
-                )));
-            }
-            Ok(None) => {}
-            Err(e) => {
-                return Err(crate::error::Error::Message(format!(
-                    "failed to poll export listener: {e}"
-                )));
-            }
-        }
-
-        match offer_matching_once(&opts.filter, &mut offered) {
-            Ok(n) if n > 0 => tracing::info!(count = n, "newly attached devices for server"),
+        match offer_new_devices(opts, &mut session, &mut offered) {
+            Ok(n) if n > 0 => tracing::info!(n, "offered new devices to server"),
             Ok(_) => {}
-            Err(e) => tracing::warn!(error = %e, "attach scan failed"),
+            Err(e) => {
+                eprintln!("offer cycle failed: {e} (reconnecting…)");
+                thread::sleep(Duration::from_secs(1));
+                match ControlSession::connect(&opts.server_addr, opts.control_port) {
+                    Ok(s) => session = s,
+                    Err(e2) => eprintln!("reconnect failed: {e2}"),
+                }
+            }
         }
-
         sleep_interruptible(opts.interval, &running);
     }
 
-    println!("Shutting down…");
-    let _ = child.kill();
-    let _ = child.wait();
-
-    if opts.unbind_on_exit && !offered.is_empty() {
-        println!("Releasing {} device(s)…", offered.len());
-        for busid in &offered {
-            match usbip_cmd::unbind(busid) {
-                Ok(()) => println!("  released {busid}"),
-                Err(e) => eprintln!("  failed to release {busid}: {e}"),
-            }
+    println!("Revoking devices from server…");
+    for busid in &offered {
+        let _ = session.request(&ClientMsg::Revoke {
+            busid: busid.clone(),
+        });
+        if opts.unbind_on_exit {
+            let _ = usbip_cmd::unbind(busid);
         }
     }
-
     println!("Stopped.");
     Ok(())
 }
 
-fn offer_matching_once(filter: &DeviceFilter, offered: &mut HashSet<String>) -> Result<usize> {
+fn offer_new_devices(
+    opts: &AttachOptions,
+    session: &mut ControlSession,
+    offered: &mut HashSet<String>,
+) -> Result<usize> {
     let devices = usbip_cmd::list_local()?;
     let mut n = 0usize;
 
@@ -214,15 +190,27 @@ fn offer_matching_once(filter: &DeviceFilter, offered: &mut HashSet<String>) -> 
     });
 
     for dev in devices {
-        if !filter.allows(&dev) {
+        if !opts.filter.allows(&dev) {
             continue;
         }
-        if filter::is_exported(&dev.busid) || offered.contains(&dev.busid) {
-            offered.insert(dev.busid.clone());
+        if offered.contains(&dev.busid) {
             continue;
+        }
+        if !filter::is_exported(&dev.busid) {
+            match usbip_cmd::bind(&dev.busid) {
+                Ok(()) => {}
+                Err(e) if usbip_cmd::is_already_bound_error(&e) => {}
+                Err(e) => {
+                    tracing::warn!(busid = %dev.busid, error = %e, "bind failed");
+                    continue;
+                }
+            }
         }
 
-        match usbip_cmd::bind(&dev.busid) {
+        match session.request(&ClientMsg::Offer {
+            usbip_port: opts.usbip_port,
+            busid: dev.busid.clone(),
+        }) {
             Ok(()) => {
                 println!(
                     "attached to server: {} ({}){}",
@@ -237,15 +225,23 @@ fn offer_matching_once(filter: &DeviceFilter, offered: &mut HashSet<String>) -> 
                 offered.insert(dev.busid);
                 n += 1;
             }
-            Err(e) if usbip_cmd::is_already_bound_error(&e) => {
-                offered.insert(dev.busid);
-            }
             Err(e) => {
-                tracing::warn!(busid = %dev.busid, error = %e, "attach failed");
+                eprintln!("server rejected {}: {e}", dev.busid);
             }
         }
     }
     Ok(n)
+}
+
+fn wait_until_ctrl_c() {
+    let running = Arc::new(AtomicBool::new(true));
+    let flag = running.clone();
+    let _ = ctrlc::set_handler(move || {
+        flag.store(false, Ordering::SeqCst);
+    });
+    while running.load(Ordering::SeqCst) {
+        thread::sleep(Duration::from_millis(200));
+    }
 }
 
 fn sleep_interruptible(total: Duration, running: &AtomicBool) {

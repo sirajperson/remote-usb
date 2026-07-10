@@ -1,13 +1,12 @@
 [Unit]
-Description=Remote USB server — receive devices clients attach
+Description=Remote USB server — wait for clients to attach devices
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-# --client is the machine with the physical USB.
 ExecStartPre=/usr/local/bin/remote-usb serve prepare
-ExecStart=/usr/local/bin/remote-usb serve 0.0.0.0 --client 192.168.1.10 --auto --match 14cd:1212
+ExecStart=/usr/local/bin/remote-usb serve 0.0.0.0
 Restart=on-failure
 RestartSec=2
 
