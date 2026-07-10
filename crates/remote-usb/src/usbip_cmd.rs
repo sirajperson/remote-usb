@@ -293,6 +293,7 @@ pub fn is_already_bound_error(err: &Error) -> bool {
 }
 
 /// Whether an attach failure looks like "already attached".
+#[allow(dead_code)]
 pub fn is_already_attached_error(err: &Error) -> bool {
     match err {
         Error::UsbipFailed { stderr, .. } => {
