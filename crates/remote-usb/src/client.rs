@@ -10,61 +10,30 @@ use crate::kmod::{self, ensure_export_modules};
 use crate::privilege::require_root;
 use crate::usbip_cmd::{self, format_device_table};
 
-/// Load export-side kernel modules.
+/// Load client (physical USB) kernel modules.
 pub fn prepare() -> Result<()> {
     ensure_export_modules()?;
     for line in kmod::module_status_lines(&["usbip_core", "usbip_host"]) {
         println!("{line}");
     }
-    println!("Client modules ready (usbip_host) — this machine can share USB.");
+    println!("Client ready — this machine can attach USB devices to a server.");
     Ok(())
 }
 
-/// List local USB devices.
+/// List local USB devices on the client.
 pub fn list() -> Result<()> {
     let devices = usbip_cmd::list_local()?;
     println!("{}", format_device_table(&devices));
     Ok(())
 }
 
-/// Bind (export) a device by busid or VID:PID.
-pub fn bind(selector: &str) -> Result<()> {
-    require_root("bind a USB device for export")?;
-    ensure_export_modules()?;
-
-    let devices = usbip_cmd::list_local()?;
-    let dev = usbip_cmd::resolve_selector(&devices, selector)?;
-    tracing::info!(busid = %dev.busid, vid_pid = %dev.vid_pid, "binding device");
-    usbip_cmd::bind(&dev.busid)?;
-    println!(
-        "Bound {} ({}) for export.{}",
-        dev.busid,
-        dev.vid_pid,
-        if dev.product.is_empty() {
-            String::new()
-        } else {
-            format!(" — {}", dev.product)
-        }
-    );
-    println!(
-        "Exported from this client (device {}).\n\
-         Keep `remote-usb share` running. On the server, import it with:\n\
-           sudo remote-usb server --client <this-ip> bind {}\n\
-         Then on the server: lsusb",
-        dev.busid, dev.busid
-    );
-    Ok(())
-}
-
-/// Unbind a previously exported device.
+/// Stop offering a local device (return it to local drivers).
 pub fn unbind(selector: &str) -> Result<()> {
-    require_root("unbind a USB device")?;
-    // Prefer resolving against local list; if the device is bound it may still appear.
+    require_root("release a USB device")?;
     let devices = usbip_cmd::list_local().unwrap_or_default();
     let busid = if let Ok(dev) = usbip_cmd::resolve_selector(&devices, selector) {
         dev.busid
     } else if !selector.contains(':') {
-        // Treat as raw busid when list is empty or device vanished.
         selector.to_string()
     } else {
         return Err(crate::error::Error::DeviceNotFound {
@@ -74,63 +43,114 @@ pub fn unbind(selector: &str) -> Result<()> {
 
     tracing::info!(%busid, "unbinding device");
     usbip_cmd::unbind(&busid)?;
-    println!("Unbound {busid}.");
+    println!("Released {busid} back to local use.");
     Ok(())
 }
 
-/// Options for `remote-usb share` (client export listener).
-pub struct ServeOptions {
-    /// CLI bind address (documentation / future use; usbipd listens on all ifaces).
-    pub bind_addr: String,
+/// Options for client `attach` — attach local USB to a remote server.
+pub struct AttachOptions {
+    /// Server the client is attaching devices to (for messages / operator clarity).
+    pub server_addr: String,
     pub port: u16,
     pub ipv4_only: bool,
     pub ipv6_only: bool,
-    /// Auto-export matching devices as they appear.
+    /// One device to attach; None when auto.
+    pub selector: Option<String>,
     pub auto: bool,
     pub filter: DeviceFilter,
     pub interval: Duration,
-    /// On shutdown, unbind devices this process exported.
     pub unbind_on_exit: bool,
 }
 
-/// Run the client share daemon (usbipd + optional auto-export).
-pub fn serve(opts: ServeOptions) -> Result<()> {
-    require_root("run the client share daemon")?;
+/// Client: attach local USB device(s) so the server can receive them.
+pub fn attach_to_server(opts: AttachOptions) -> Result<()> {
+    require_root("attach USB devices to the server")?;
     ensure_export_modules()?;
 
     if opts.auto {
-        serve_with_auto(opts)
+        attach_auto(opts)
     } else {
-        println!(
-            "Client exporting USB on {} (TCP port {}, plain TCP, no auth).\n\
-             Export a device: remote-usb bind <BUSID|VID:PID>\n\
-             Auto mode:       remote-usb share --auto --match <VID:PID>\n\
-             On the SERVER:   remote-usb server --client <this-ip> bind …\n\
-             Then on server:  lsusb\n\
-             Press Ctrl+C to stop.",
-            opts.bind_addr, opts.port
-        );
-        usbip_cmd::serve_foreground(opts.port, opts.ipv4_only, opts.ipv6_only)
+        let selector = opts
+            .selector
+            .as_deref()
+            .expect("selector required without --auto");
+        attach_one(&opts, selector)
     }
 }
 
-fn serve_with_auto(opts: ServeOptions) -> Result<()> {
+fn attach_one(opts: &AttachOptions, selector: &str) -> Result<()> {
+    // Need the export listener up so the server can receive this device.
+    let mut child = usbip_cmd::spawn_usbipd(opts.port, opts.ipv4_only, opts.ipv6_only)?;
+    thread::sleep(Duration::from_millis(300));
+
+    let devices = usbip_cmd::list_local()?;
+    let dev = usbip_cmd::resolve_selector(&devices, selector)?;
+    tracing::info!(busid = %dev.busid, vid_pid = %dev.vid_pid, "attaching to server");
+    usbip_cmd::bind(&dev.busid)?;
+
     println!(
-        "Client auto-exporting USB on {} (TCP port {}).\n\
-         Filter: {} | poll: {:.1}s | plain TCP, no auth.\n\
-         WARNING: Exported devices leave this client (keyboard/mouse will disconnect).\n\
-         Prefer --match VID:PID.\n\
-         On the SERVER: remote-usb server --client <this-ip> --auto\n\
-         Imported devices appear in lsusb on the server.\n\
+        "Client attached {} ({}) to server {}.\n\
+         Keep this process running while the server uses the device.\n\
+         On the server (if not using --auto):\n\
+           sudo remote-usb serve --client <this-client-ip> import {}\n\
+         On the server, confirm: lsusb\n\
+         Press Ctrl+C to stop offering this device.",
+        dev.busid,
+        dev.vid_pid,
+        opts.server_addr,
+        dev.busid
+    );
+    if !dev.product.is_empty() {
+        println!("Product: {}", dev.product);
+    }
+
+    // Block until Ctrl+C so usbipd stays up.
+    let running = Arc::new(AtomicBool::new(true));
+    let flag = running.clone();
+    let _ = ctrlc::set_handler(move || {
+        flag.store(false, Ordering::SeqCst);
+    });
+
+    while running.load(Ordering::SeqCst) {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return Err(crate::error::Error::Message(format!(
+                    "export listener exited: {status}"
+                )));
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(200)),
+            Err(e) => {
+                return Err(crate::error::Error::Message(format!(
+                    "failed to poll export listener: {e}"
+                )));
+            }
+        }
+    }
+
+    println!("Stopping…");
+    let _ = usbip_cmd::unbind(&dev.busid);
+    let _ = child.kill();
+    let _ = child.wait();
+    println!("Device {} released.", dev.busid);
+    Ok(())
+}
+
+fn attach_auto(opts: AttachOptions) -> Result<()> {
+    println!(
+        "Client attaching USB devices to server {} (TCP port {}).\n\
+         Filter: {} | poll: {:.1}s\n\
+         WARNING: without --match this may attach keyboards/mice too.\n\
+         On the server run:\n\
+           sudo remote-usb serve 0.0.0.0 --client <this-client-ip> --auto\n\
+         Devices then appear in lsusb on the server.\n\
          Press Ctrl+C to stop.",
-        opts.bind_addr,
+        opts.server_addr,
         opts.port,
         opts.filter.describe(),
         opts.interval.as_secs_f32()
     );
 
     let mut child = usbip_cmd::spawn_usbipd(opts.port, opts.ipv4_only, opts.ipv6_only)?;
-    // Brief delay so usbipd is listening before the first bind.
     thread::sleep(Duration::from_millis(300));
 
     let running = Arc::new(AtomicBool::new(true));
@@ -141,44 +161,42 @@ fn serve_with_auto(opts: ServeOptions) -> Result<()> {
         tracing::warn!(error = %e, "could not install Ctrl+C handler");
     }
 
-    let mut exported: HashSet<String> = HashSet::new();
+    let mut offered: HashSet<String> = HashSet::new();
 
     while running.load(Ordering::SeqCst) {
-        // Exit if usbipd died.
         match child.try_wait() {
             Ok(Some(status)) => {
                 return Err(crate::error::Error::Message(format!(
-                    "usbipd exited unexpectedly with {status}"
+                    "export listener exited: {status}"
                 )));
             }
             Ok(None) => {}
             Err(e) => {
                 return Err(crate::error::Error::Message(format!(
-                    "failed to poll usbipd: {e}"
+                    "failed to poll export listener: {e}"
                 )));
             }
         }
 
-        match auto_export_once(&opts.filter, &mut exported) {
-            Ok(n) if n > 0 => tracing::info!(bound = n, "auto-export cycle bound new devices"),
+        match offer_matching_once(&opts.filter, &mut offered) {
+            Ok(n) if n > 0 => tracing::info!(count = n, "newly attached devices for server"),
             Ok(_) => {}
-            Err(e) => tracing::warn!(error = %e, "auto-export cycle failed"),
+            Err(e) => tracing::warn!(error = %e, "attach scan failed"),
         }
 
-        // Sleep in small steps so Ctrl+C is responsive.
         sleep_interruptible(opts.interval, &running);
     }
 
-    println!("Shutting down...");
+    println!("Shutting down…");
     let _ = child.kill();
     let _ = child.wait();
 
-    if opts.unbind_on_exit && !exported.is_empty() {
-        println!("Unbinding {} device(s) exported by this process...", exported.len());
-        for busid in &exported {
+    if opts.unbind_on_exit && !offered.is_empty() {
+        println!("Releasing {} device(s)…", offered.len());
+        for busid in &offered {
             match usbip_cmd::unbind(busid) {
-                Ok(()) => println!("  unbound {busid}"),
-                Err(e) => eprintln!("  failed to unbind {busid}: {e}"),
+                Ok(()) => println!("  released {busid}"),
+                Err(e) => eprintln!("  failed to release {busid}: {e}"),
             }
         }
     }
@@ -187,14 +205,11 @@ fn serve_with_auto(opts: ServeOptions) -> Result<()> {
     Ok(())
 }
 
-/// Bind any local devices that match the filter and are not yet exported.
-/// Returns number of newly bound devices.
-fn auto_export_once(filter: &DeviceFilter, exported: &mut HashSet<String>) -> Result<usize> {
+fn offer_matching_once(filter: &DeviceFilter, offered: &mut HashSet<String>) -> Result<usize> {
     let devices = usbip_cmd::list_local()?;
-    let mut bound = 0usize;
+    let mut n = 0usize;
 
-    // Drop tracking for devices that disappeared.
-    exported.retain(|busid| {
+    offered.retain(|busid| {
         std::path::Path::new(&format!("/sys/bus/usb/devices/{busid}")).exists()
     });
 
@@ -202,15 +217,15 @@ fn auto_export_once(filter: &DeviceFilter, exported: &mut HashSet<String>) -> Re
         if !filter.allows(&dev) {
             continue;
         }
-        if filter::is_exported(&dev.busid) || exported.contains(&dev.busid) {
-            exported.insert(dev.busid.clone());
+        if filter::is_exported(&dev.busid) || offered.contains(&dev.busid) {
+            offered.insert(dev.busid.clone());
             continue;
         }
 
         match usbip_cmd::bind(&dev.busid) {
             Ok(()) => {
                 println!(
-                    "auto-export: bound {} ({}){}",
+                    "attached to server: {} ({}){}",
                     dev.busid,
                     dev.vid_pid,
                     if dev.product.is_empty() {
@@ -219,22 +234,18 @@ fn auto_export_once(filter: &DeviceFilter, exported: &mut HashSet<String>) -> Re
                         format!(" — {}", dev.product)
                     }
                 );
-                exported.insert(dev.busid);
-                bound += 1;
+                offered.insert(dev.busid);
+                n += 1;
             }
             Err(e) if usbip_cmd::is_already_bound_error(&e) => {
-                exported.insert(dev.busid);
+                offered.insert(dev.busid);
             }
             Err(e) => {
-                tracing::warn!(
-                    busid = %dev.busid,
-                    error = %e,
-                    "auto-export: bind failed"
-                );
+                tracing::warn!(busid = %dev.busid, error = %e, "attach failed");
             }
         }
     }
-    Ok(bound)
+    Ok(n)
 }
 
 fn sleep_interruptible(total: Duration, running: &AtomicBool) {

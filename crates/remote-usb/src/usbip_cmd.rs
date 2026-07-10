@@ -220,6 +220,7 @@ fn usbipd_command(tcp_port: u16, ipv4_only: bool, ipv6_only: bool) -> Result<Com
 }
 
 /// Run `usbipd` in the foreground (blocks until exit).
+#[allow(dead_code)]
 pub fn serve_foreground(tcp_port: u16, ipv4_only: bool, ipv6_only: bool) -> Result<()> {
     let mut cmd = usbipd_command(tcp_port, ipv4_only, ipv6_only)?;
     tracing::info!(tcp_port, "starting usbipd in foreground");

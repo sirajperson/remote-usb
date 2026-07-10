@@ -1,17 +1,16 @@
 [Unit]
-Description=Remote USB client — share local USB devices with a server
+Description=Remote USB client — attach local USB devices to the server
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
+# Set SERVER_IP to the machine running `remote-usb serve`.
+# Prefer --match VID:PID so keyboards/mice stay local.
 ExecStartPre=/usr/local/bin/remote-usb prepare
-# Prefer --match VID:PID so keyboards/mice are not shared.
-ExecStart=/usr/local/bin/remote-usb share 0.0.0.0 --port 3240 --auto
+ExecStart=/usr/local/bin/remote-usb attach SERVER_IP --auto --match 14cd:1212
 Restart=on-failure
 RestartSec=2
-
-# No authentication: restrict with firewall on this client.
 
 [Install]
 WantedBy=multi-user.target

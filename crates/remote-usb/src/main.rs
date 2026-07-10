@@ -1,11 +1,8 @@
-//! remote-usb — clients share USB devices with a server over Linux USB/IP.
+//! remote-usb — server receives USB devices that clients attach to it.
 //!
-//! Product model:
-//! - **Client** (default): machine with physical USB; shares devices with a server.
-//! - **Server**: waits to use devices that clients share with it.
-//!
-//! USB/IP note: the client runs the export listener (`share`); the server connects
-//! to each client and attaches devices.
+//! Direction (do not invert):
+//! - **Server** runs `serve` and uses USB devices from clients.
+//! - **Client** has the physical USB and **attaches** devices to the server.
 
 mod client;
 mod error;
@@ -28,72 +25,56 @@ const DEFAULT_INTERVAL_SECS: f32 = 2.0;
 const DEFAULT_BIND: &str = "0.0.0.0";
 
 const TOP_ABOUT: &str =
-    "Clients share USB devices with a server over the network (Linux USB/IP)";
+    "Server receives USB devices; clients attach their devices to the server";
 
 const TOP_LONG_ABOUT: &str = "\
-The server imports USB devices from clients over a trusted network (Linux USB/IP).
+remote-usb: the server receives USB devices that clients attach to it.
 
-MENTAL MODEL
-  SERVER  — imports devices from clients; after import, devices show in lsusb.
-  CLIENT  — physical USB is plugged in; exports devices to the server.
+DIRECTION (fixed — do not reverse these roles)
+  SERVER  runs `serve` and ends up with the devices (see them in lsusb).
+  CLIENT  has the physical USB plug and attaches devices to the server.
 
-  Default commands (list, bind, share) are for the CLIENT.
-  `remote-usb server …` is for the SERVER.
+  sudo remote-usb serve 0.0.0.0 --client <CLIENT_IP> --auto
+  sudo remote-usb attach <SERVER_IP> --auto --match <VID:PID>
 
 SECURITY
-  Plain TCP (default port 3240), no encryption or authentication.
-  Trusted LAN/VPN only. Do not expose the port to the internet.
+  Plain TCP port 3240 by default. No encryption or auth.
+  Trusted LAN/VPN only.
 
-QUICK START — DIRECT ATTACHMENT
-  1) SERVER (imports from the client):
+MANUAL FLOW
+  1) Server:
 
-    sudo remote-usb server prepare
-    sudo remote-usb server --client 192.168.1.10 --auto --match 14cd:1212
+       sudo remote-usb serve 0.0.0.0 --client 192.168.1.10
 
-  2) CLIENT (exports its USB):
+     (add --auto to keep importing; or import one device later)
 
-    sudo remote-usb share --auto --match 14cd:1212
+  2) Client (USB plugged in here):
 
-  3) On the SERVER, confirm:
+       remote-usb list
+       sudo remote-usb attach 192.168.1.20 1-6
 
-    lsusb
-    remote-usb ports
+     (192.168.1.20 = server IP)
 
-QUICK START — MANUAL
-  1) Server loads:
+  3) On the server:
 
-    sudo remote-usb server prepare
-
-  2) Client exports:
-
-    remote-usb list
-    sudo remote-usb share 0.0.0.0
-    sudo remote-usb bind 1-6
-
-  3) Server imports from the client:
-
-    remote-usb server --client 192.168.1.10 list
-    sudo remote-usb server --client 192.168.1.10 bind 1-6
-    lsusb
-    remote-usb ports
+       lsusb
+       remote-usb ports
 ";
 
 const TOP_AFTER_HELP: &str = "\
 Examples:
-  # SERVER — import devices from a client
-  sudo remote-usb server prepare
-  remote-usb server --client 192.168.1.10 list
-  sudo remote-usb server --client 192.168.1.10 bind 1-6
-  sudo remote-usb server --client 192.168.1.10 --auto --match 0781:5581
+  # SERVER — receive devices from a client
+  sudo remote-usb serve 0.0.0.0 --client 192.168.1.10 --auto --match 14cd:1212
+  sudo remote-usb serve --client 192.168.1.10 list
+  sudo remote-usb serve --client 192.168.1.10 import 1-6
   lsusb
   remote-usb ports
   sudo remote-usb detach 0
 
-  # CLIENT — export local USB to the server
+  # CLIENT — attach local USB to the server
   remote-usb list
-  sudo remote-usb share --auto --match 0781:5581
-  sudo remote-usb share 0.0.0.0
-  sudo remote-usb bind 1-6
+  sudo remote-usb attach 192.168.1.20 1-6
+  sudo remote-usb attach 192.168.1.20 --auto --match 14cd:1212
   sudo remote-usb unbind 1-6
 
 Environment:
@@ -123,161 +104,150 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
-    /// List local USB devices (client)
+    // ----- SERVER -----
+    /// SERVER: wait for clients and receive the devices they attach
     #[command(
-        long_about = "List USB devices plugged into this client machine.\n\n\
-Use BUSID (e.g. 1-6) or VID:PID (e.g. 14cd:1212) with bind/unbind.",
+        about = "SERVER: run the server (receive devices from clients)",
+        long_about = "\
+SERVER command — run this on the machine that should have the USB devices.
+
+The server does NOT plug in the physical USB. Clients do, and they attach
+those devices to this server.
+
+  sudo remote-usb serve 0.0.0.0 --client <CLIENT_IP> --auto
+  sudo remote-usb serve --client <CLIENT_IP> list
+  sudo remote-usb serve --client <CLIENT_IP> import <device>
+
+After a device is received, confirm on this machine:
+
+  lsusb
+  remote-usb ports
+
+--client is the IP of the machine where the USB is physically plugged in.",
+        after_help = "\
+Examples:
+  sudo remote-usb serve 0.0.0.0 --client 192.168.1.10 --auto
+  sudo remote-usb serve --client 192.168.1.10 list
+  sudo remote-usb serve --client 192.168.1.10 import 14cd:1212
+  lsusb
+"
+    )]
+    Serve {
+        /// Address this server listens for / binds (default 0.0.0.0 = all interfaces)
+        #[arg(default_value = DEFAULT_BIND)]
+        bind_addr: String,
+
+        /// Client IP — machine that has the physical USB and will attach devices
+        #[arg(long = "client", value_name = "CLIENT_IP")]
+        client: Option<String>,
+
+        /// TCP port used with the client (default 3240)
+        #[arg(long, default_value_t = DEFAULT_PORT, env = "REMOTE_USB_PORT")]
+        port: u16,
+
+        /// Keep receiving every device the client attaches
+        #[arg(long)]
+        auto: bool,
+
+        /// Only auto-receive these VID:PID values (repeatable)
+        #[arg(long = "match", value_name = "VID:PID")]
+        match_ids: Vec<String>,
+
+        /// Never auto-receive these VID:PID values
+        #[arg(long = "exclude", value_name = "VID:PID")]
+        exclude_ids: Vec<String>,
+
+        /// Also receive USB hubs
+        #[arg(long)]
+        include_hubs: bool,
+
+        /// Seconds between polls when --auto is set
+        #[arg(long, default_value_t = DEFAULT_INTERVAL_SECS)]
+        interval: f32,
+
+        /// Keep devices if the client disconnects (default: remove them)
+        #[arg(long)]
+        no_detach_missing: bool,
+
+        #[command(subcommand)]
+        command: Option<ServeCmd>,
+    },
+
+    /// SERVER: list devices already received from clients
+    #[command(
+        long_about = "List USB devices this server has already received from clients.\n\
+Also run `lsusb` — received devices appear as normal local USB.",
+        after_help = "Examples:\n  remote-usb ports\n  lsusb"
+    )]
+    Ports,
+
+    /// SERVER: remove a received device
+    #[command(
+        long_about = "Remove a device previously received from a client.\n\
+PORT is from `remote-usb ports` (0, 1, …), not the TCP port.",
+        after_help = "Examples:\n  remote-usb ports\n  sudo remote-usb detach 0"
+    )]
+    Detach {
+        /// VHCI port from `remote-usb ports`
+        port: u32,
+    },
+
+    // ----- CLIENT -----
+    /// CLIENT: list USB devices plugged into this machine
+    #[command(
+        long_about = "List local USB devices on this client (where the stick is plugged in).",
         after_help = "Examples:\n  remote-usb list"
     )]
     List,
 
-    /// Export a local USB device to the server (client)
+    /// CLIENT: attach a local USB device to the server
     #[command(
-        long_about = "Export a local USB device so the server can import it.\n\n\
-Requires root and a running `remote-usb share` on this client.\n\
-SELECTOR: busid (1-6) or VID:PID (14cd:1212).",
-        after_help = "Examples:\n  \
-sudo remote-usb bind 1-6\n  \
-sudo remote-usb bind 14cd:1212"
-    )]
-    Bind {
-        /// Busid (1-6) or VID:PID (14cd:1212)
-        selector: String,
-    },
-
-    /// Stop exporting a local USB device (client)
-    #[command(
-        long_about = "Stop exporting a device so local drivers can use it again.",
-        after_help = "Examples:\n  sudo remote-usb unbind 1-6"
-    )]
-    Unbind {
-        /// Busid or VID:PID
-        selector: String,
-    },
-
-    /// Load client kernel modules (usbip_host)
-    #[command(
-        long_about = "Load usbip_core + usbip_host on this client so devices can be exported."
-    )]
-    Prepare,
-
-    /// Client: export this machine's USB so the server can import it
-    #[command(
-        about = "Client: export this machine's USB to a server",
+        about = "CLIENT: attach a local USB device to the server",
         long_about = "\
-CLIENT command — run on the machine where USB is plugged in.
+CLIENT command — run on the machine where the USB is physically plugged in.
 
-Exports devices so a remote server can import them.
-BIND_ADDR defaults to 0.0.0.0 (all interfaces). Restrict access with a firewall.
+Attaches local device(s) so the server can receive them.
 
-Without --auto, export devices with `remote-usb bind`.
-With --auto, matching devices are exported as they appear.
+  remote-usb list
+  sudo remote-usb attach <SERVER_IP> 1-6
+  sudo remote-usb attach <SERVER_IP> --auto --match 14cd:1212
 
-Typical order:
-  1. On server:  sudo remote-usb server prepare
-  2. On client:  sudo remote-usb share …  and  bind …
-  3. On server:  remote-usb server --client <this-ip> bind …  then  lsusb
+SERVER_IP is the machine running `remote-usb serve`.
 
-WARNING: --auto without --match exports ALL non-hub USB devices (keyboard/mouse too).",
+The server should already be running, e.g.:
+
+  sudo remote-usb serve 0.0.0.0 --client <this-client-ip> --auto
+
+WARNING: --auto without --match may attach ALL non-hub devices (keyboard/mouse).",
         after_help = "\
 Examples:
-  sudo remote-usb share
-  sudo remote-usb share 0.0.0.0
-  sudo remote-usb share --auto --match 0781:5581
-  sudo remote-usb bind 14cd:1212
+  sudo remote-usb attach 192.168.1.20 1-6
+  sudo remote-usb attach 192.168.1.20 14cd:1212
+  sudo remote-usb attach 192.168.1.20 --auto --match 14cd:1212
 "
     )]
-    Share {
-        /// Listen intent (default 0.0.0.0 = all interfaces)
-        #[arg(default_value = DEFAULT_BIND)]
-        bind_addr: String,
+    Attach {
+        /// IP or hostname of the server (machine running `serve`)
+        server: String,
+
+        /// Local busid or VID:PID to attach (omit with --auto)
+        selector: Option<String>,
+
+        /// Attach matching devices automatically as they appear
+        #[arg(long)]
+        auto: bool,
 
         /// TCP port (default 3240)
         #[arg(long, default_value_t = DEFAULT_PORT, env = "REMOTE_USB_PORT")]
         port: u16,
 
-        /// IPv4 only
+        /// IPv4 only for the client export listener
         #[arg(long)]
         ipv4: bool,
 
-        /// IPv6 only
+        /// IPv6 only for the client export listener
         #[arg(long)]
         ipv6: bool,
-
-        /// Auto-share matching local USB devices as they appear
-        #[arg(long)]
-        auto: bool,
-
-        /// Only auto-share these VID:PID values (repeatable)
-        #[arg(long = "match", value_name = "VID:PID")]
-        match_ids: Vec<String>,
-
-        /// Never auto-share these VID:PID values (repeatable)
-        #[arg(long = "exclude", value_name = "VID:PID")]
-        exclude_ids: Vec<String>,
-
-        /// Also auto-share USB hubs
-        #[arg(long)]
-        include_hubs: bool,
-
-        /// Seconds between scans when --auto is set
-        #[arg(long, default_value_t = DEFAULT_INTERVAL_SECS)]
-        interval: f32,
-
-        /// Keep devices shared after exit (default: unbind on exit with --auto)
-        #[arg(long)]
-        no_unbind_on_exit: bool,
-    },
-
-    /// Server: import USB devices that clients export
-    #[command(
-        about = "Server: import USB devices from clients",
-        long_about = "\
-SERVER command — run on the machine that imports USB from clients.
-
-Flow:
-  1. Server loads:  sudo remote-usb server prepare
-  2. Client exports devices (`share` + `bind` on the client)
-  3. Server imports:  server --client <CLIENT_IP> bind …
-  4. Confirm on server:  lsusb   and   remote-usb ports
-
-  sudo remote-usb server prepare
-  remote-usb server --client <CLIENT_IP> list
-  sudo remote-usb server --client <CLIENT_IP> bind <device>
-  sudo remote-usb server --client <CLIENT_IP> --auto
-  lsusb
-
-Optional BIND_ADDR (default 0.0.0.0) documents this server.",
-        after_help = "\
-Examples:
-  # Load server, then import from a client
-  sudo remote-usb server prepare
-  remote-usb server --client 192.168.1.10 list
-  sudo remote-usb server --client 192.168.1.10 bind 1-6
-  sudo remote-usb server --client 192.168.1.10 bind 14cd:1212
-  sudo remote-usb server 0.0.0.0 --client 192.168.1.10 --auto --match 14cd:1212
-  lsusb
-  remote-usb ports
-  sudo remote-usb detach 0
-",
-        arg_required_else_help = true
-    )]
-    Server {
-        /// This server's address note (default 0.0.0.0)
-        #[arg(default_value = DEFAULT_BIND)]
-        bind_addr: String,
-
-        /// Client IP/hostname that is sharing USB (required for list/bind/--auto)
-        #[arg(long = "client", value_name = "CLIENT_IP")]
-        client: Option<String>,
-
-        /// TCP port on the client (default 3240)
-        #[arg(long, default_value_t = DEFAULT_PORT, env = "REMOTE_USB_PORT")]
-        port: u16,
-
-        /// Continuously attach devices the client shares
-        #[arg(long)]
-        auto: bool,
 
         /// Only auto-attach these VID:PID values (repeatable)
         #[arg(long = "match", value_name = "VID:PID")]
@@ -291,68 +261,53 @@ Examples:
         #[arg(long)]
         include_hubs: bool,
 
-        /// Seconds between polls when --auto is set
+        /// Seconds between scans when --auto is set
         #[arg(long, default_value_t = DEFAULT_INTERVAL_SECS)]
         interval: f32,
 
-        /// Do not detach when a client device disappears
+        /// Keep devices attached after exit (default: release on exit with --auto)
         #[arg(long)]
-        no_detach_missing: bool,
-
-        #[command(subcommand)]
-        command: Option<ServerCmd>,
+        no_unbind_on_exit: bool,
     },
 
-    /// List devices imported on this server (also check lsusb)
+    /// CLIENT: stop attaching a local device (return it to local use)
     #[command(
-        long_about = "Show devices currently imported on this server from clients.\n\
-After import, devices also appear in `lsusb`.\n\
-Port numbers are used with `detach`.",
-        after_help = "Examples:\n  remote-usb ports\n  lsusb"
+        long_about = "Stop offering a local device to the server; restore local drivers.",
+        after_help = "Examples:\n  sudo remote-usb unbind 1-6"
     )]
-    Ports,
-
-    /// Stop importing a client device on this server
-    #[command(
-        long_about = "Detach a device previously imported from a client.\n\
-PORT is the VHCI port from `remote-usb ports` (0, 1, …), not the TCP port.",
-        after_help = "Examples:\n  remote-usb ports\n  sudo remote-usb detach 0"
-    )]
-    Detach {
-        /// VHCI port from `remote-usb ports`
-        port: u32,
+    Unbind {
+        /// Busid or VID:PID
+        selector: String,
     },
+
+    /// CLIENT: load modules needed to attach devices to a server
+    #[command(
+        long_about = "Load usbip_core + usbip_host on the client (physical USB machine)."
+    )]
+    Prepare,
 }
 
 #[derive(Debug, Subcommand)]
-enum ServerCmd {
-    /// Load server kernel modules (vhci_hcd) — do this first
-    #[command(
-        long_about = "Load usbip_core + vhci_hcd on this server so it can import client devices.\n\
-Typically the first step on the server before clients export."
-    )]
+enum ServeCmd {
+    /// Load server modules (vhci) — also done automatically by serve
+    #[command(long_about = "Load usbip_core + vhci_hcd on the server.")]
     Prepare,
 
-    /// List devices a client is currently exporting
+    /// List devices a client is currently offering
     #[command(
-        long_about = "List USB devices a client is exporting (via `remote-usb share` + bind).",
-        after_help = "Examples:\n  remote-usb server --client 192.168.1.10 list"
+        long_about = "List devices the client has attached for this server.",
+        after_help = "Examples:\n  remote-usb serve --client 192.168.1.10 list"
     )]
     List,
 
-    /// Import one device from a client onto this server
+    /// Receive one device from the client onto this server
     #[command(
-        name = "bind",
-        visible_alias = "attach",
-        long_about = "Import one device from a client so it appears as local USB on the server.\n\n\
-After success, confirm with `lsusb` and `remote-usb ports`.\n\
-SELECTOR: busid or VID:PID from `server --client <ip> list`.",
+        long_about = "Receive one device from --client so it appears in lsusb on the server.",
         after_help = "Examples:\n  \
-sudo remote-usb server --client 192.168.1.10 bind 1-6\n  \
-sudo remote-usb server --client 192.168.1.10 bind 14cd:1212\n  \
+sudo remote-usb serve --client 192.168.1.10 import 1-6\n  \
 lsusb"
     )]
-    Bind {
+    Import {
         /// Busid or VID:PID on the client
         selector: String,
     },
@@ -371,46 +326,12 @@ fn main() {
 fn run(command: Commands) -> Result<()> {
     match command {
         Commands::List => client::list(),
-        Commands::Bind { selector } => client::bind(&selector),
-        Commands::Unbind { selector } => client::unbind(&selector),
         Commands::Prepare => client::prepare(),
+        Commands::Unbind { selector } => client::unbind(&selector),
         Commands::Ports => server::ports(),
         Commands::Detach { port } => server::detach(port),
 
-        Commands::Share {
-            bind_addr,
-            port,
-            ipv4,
-            ipv6,
-            auto,
-            match_ids,
-            exclude_ids,
-            include_hubs,
-            interval,
-            no_unbind_on_exit,
-        } => {
-            if ipv4 && ipv6 {
-                return Err(Error::Message(
-                    "cannot specify both --ipv4 and --ipv6".into(),
-                ));
-            }
-            if interval <= 0.0 {
-                return Err(Error::Message("--interval must be positive".into()));
-            }
-            let filter = DeviceFilter::from_cli(&match_ids, &exclude_ids, include_hubs)?;
-            client::serve(client::ServeOptions {
-                bind_addr,
-                port,
-                ipv4_only: ipv4,
-                ipv6_only: ipv6,
-                auto,
-                filter,
-                interval: Duration::from_secs_f32(interval),
-                unbind_on_exit: !no_unbind_on_exit,
-            })
-        }
-
-        Commands::Server {
+        Commands::Serve {
             bind_addr,
             client,
             port,
@@ -421,7 +342,7 @@ fn run(command: Commands) -> Result<()> {
             interval,
             no_detach_missing,
             command,
-        } => run_server(
+        } => run_serve(
             &bind_addr,
             client.as_deref(),
             port,
@@ -433,10 +354,58 @@ fn run(command: Commands) -> Result<()> {
             no_detach_missing,
             command,
         ),
+
+        Commands::Attach {
+            server,
+            selector,
+            auto,
+            port,
+            ipv4,
+            ipv6,
+            match_ids,
+            exclude_ids,
+            include_hubs,
+            interval,
+            no_unbind_on_exit,
+        } => {
+            if ipv4 && ipv6 {
+                return Err(Error::Message(
+                    "cannot specify both --ipv4 and --ipv6".into(),
+                ));
+            }
+            if auto && selector.is_some() {
+                return Err(Error::Message(
+                    "use either a device selector or --auto, not both".into(),
+                ));
+            }
+            if !auto && selector.is_none() {
+                return Err(Error::Message(
+                    "specify a device (busid or VID:PID) or pass --auto\n\
+                     example: remote-usb attach 192.168.1.20 1-6\n\
+                     example: remote-usb attach 192.168.1.20 --auto --match 14cd:1212"
+                        .into(),
+                ));
+            }
+            if interval <= 0.0 {
+                return Err(Error::Message("--interval must be positive".into()));
+            }
+            let filter = DeviceFilter::from_cli(&match_ids, &exclude_ids, include_hubs)?;
+            client::attach_to_server(client::AttachOptions {
+                server_addr: server,
+                port,
+                ipv4_only: ipv4,
+                ipv6_only: ipv6,
+                selector,
+                auto,
+                filter,
+                interval: Duration::from_secs_f32(interval),
+                unbind_on_exit: !no_unbind_on_exit,
+            })
+        }
     }
 }
 
-fn run_server(
+fn run_serve(
     bind_addr: &str,
     client: Option<&str>,
     port: u16,
@@ -446,25 +415,47 @@ fn run_server(
     include_hubs: bool,
     interval: f32,
     no_detach_missing: bool,
-    command: Option<ServerCmd>,
+    command: Option<ServeCmd>,
 ) -> Result<()> {
-    let _ = bind_addr; // product-facing; USB/IP attaches outbound to clients
-
-    if matches!(command, Some(ServerCmd::Prepare)) {
-        return server::prepare();
+    match command {
+        Some(ServeCmd::Prepare) => return server::prepare(),
+        Some(ServeCmd::List) | Some(ServeCmd::Import { .. }) | None => {}
     }
 
     if auto && command.is_some() {
         return Err(Error::Message(
-            "use either --auto or a subcommand (list/bind), not both".into(),
+            "use either --auto or a subcommand (list/import), not both".into(),
         ));
+    }
+
+    // Bare `serve 0.0.0.0` without --client: prepare and explain next step.
+    if client.is_none() && command.is_none() && !auto {
+        server::prepare()?;
+        println!(
+            "Server ready on {bind_addr} (import side loaded).\n\
+             \n\
+             This machine RECEIVES USB devices from clients. It does not export USB.\n\
+             \n\
+             Next:\n\
+               1. On each CLIENT (USB plugged in):\n\
+                    sudo remote-usb attach <this-server-ip> <device>\n\
+                    # or: sudo remote-usb attach <this-server-ip> --auto --match VID:PID\n\
+               2. On this SERVER, receive them:\n\
+                    sudo remote-usb serve {bind_addr} --client <CLIENT_IP> --auto\n\
+                    # or once: sudo remote-usb serve --client <CLIENT_IP> import <device>\n\
+               3. Confirm here:\n\
+                    lsusb\n\
+                    remote-usb ports"
+        );
+        return Ok(());
     }
 
     let client = client.ok_or_else(|| {
         Error::Message(
-            "server needs --client <CLIENT_IP> (except for `server prepare`)\n\
-             example: remote-usb server --client 192.168.1.10 list\n\
-             example: remote-usb server --client 192.168.1.10 --auto"
+            "serve needs --client <CLIENT_IP> (the machine with the physical USB)\n\
+             example: remote-usb serve 0.0.0.0 --client 192.168.1.10 --auto\n\
+             example: remote-usb serve --client 192.168.1.10 list\n\
+             example: remote-usb serve --client 192.168.1.10 import 1-6"
                 .into(),
         )
     })?;
@@ -474,6 +465,10 @@ fn run_server(
             return Err(Error::Message("--interval must be positive".into()));
         }
         let filter = DeviceFilter::from_cli(match_ids, exclude_ids, include_hubs)?;
+        println!(
+            "Server listening on {bind_addr}; receiving devices from client {client}.\n\
+             Clients attach devices with: remote-usb attach <this-server-ip> …"
+        );
         return server::follow(server::FollowOptions {
             host: client.to_string(),
             port,
@@ -484,12 +479,13 @@ fn run_server(
     }
 
     match command {
-        Some(ServerCmd::List) => server::list(client, port),
-        Some(ServerCmd::Bind { selector }) => server::attach(client, &selector, port),
-        Some(ServerCmd::Prepare) => server::prepare(), // already handled; keep exhaustive
+        Some(ServeCmd::List) => server::list(client, port),
+        Some(ServeCmd::Import { selector }) => server::attach(client, &selector, port),
+        Some(ServeCmd::Prepare) => server::prepare(),
         None => Err(Error::Message(
-            "specify list, bind, or --auto\n\
-             try: remote-usb server --help"
+            "specify --auto, list, or import\n\
+             example: remote-usb serve --client 192.168.1.10 --auto\n\
+             example: remote-usb serve --client 192.168.1.10 import 1-6"
                 .into(),
         )),
     }
